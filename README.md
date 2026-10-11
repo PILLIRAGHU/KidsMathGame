@@ -5,7 +5,33 @@ carry/borrow helper boxes, animations and sounds. Scores are saved per player na
 
 Designed & developed by Raghu Pilli.
 
-## Run it
+## Where scores are saved
+
+- **Firebase (online, works on GitHub Pages):** used when `firebase-config.js` has your Firebase settings.
+- **Local server (SQLite):** used when `firebase-config.js` is left empty and you run `npm start`.
+
+## Put it on GitHub Pages (with Firebase)
+
+GitHub Pages can only host files, it can't run a database, so scores are saved in Firebase
+Firestore (free plan is plenty for this game).
+
+1. Go to <https://console.firebase.google.com>, click **Create a project** (Google Analytics not needed).
+2. In the project, open **Build → Firestore Database → Create database**. Pick a location near you
+   and choose **production mode**.
+3. Open the **Rules** tab, replace everything with the contents of [firestore.rules](firestore.rules),
+   and click **Publish**.
+4. Open **Project settings** (gear icon) → **General** → **Your apps** → click the **Web** icon (`</>`),
+   give it any nickname (no Firebase Hosting needed) and **Register app**.
+5. Copy the values from the `firebaseConfig` it shows into [firebase-config.js](firebase-config.js)
+   (`apiKey`, `authDomain`, `projectId`, `storageBucket`, `messagingSenderId`, `appId`).
+6. Commit and push. Open your GitHub Pages site, play one question, and check the Score Book says
+   "☁️ Scores are saved online". The scores appear in the Firebase console under **Firestore Database → Data**.
+
+The Firebase web config is meant to be public, so it's fine in the repository; the rules are what
+protect the data (each answer can only add one correct-or-wrong to a record, nothing can be edited or deleted).
+To reset a player, delete their document under `users` in the Firebase console.
+
+## Run it locally
 
 Requires [Node.js](https://nodejs.org) 22.5 or newer. There is nothing to install.
 
@@ -36,7 +62,7 @@ history on any machine that uses the same server.
 
 ## Offline
 
-If the server can't be reached, scores are kept in the browser and sent automatically the next
+If the database (Firebase or the local server) can't be reached, scores are kept in the browser and sent automatically the next
 time the server answers. Opening `index.html` directly (without the server) still works, but
 scores then stay on that one device.
 

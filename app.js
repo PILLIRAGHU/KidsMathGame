@@ -10,8 +10,13 @@
   const DEFAULT_DIGITS = 1;
   const CACHE_KEY = 'mathQuestKids.users.v1';
   const PENDING_KEY = 'mathQuestKids.pending.v1';
-  // Records are stored in server.js's SQLite database. The page may be served by server.js itself or by
-  // something else (Live Server, a file:// double-click), so also try server.js on its default port.
+  // Where scores are stored:
+  //  - Firebase Firestore, when firebase-config.js has a config (works on GitHub Pages / any static host);
+  //  - otherwise server.js's SQLite database (npm start). The page may be served by server.js itself or
+  //    by something else (Live Server, a file:// double-click), so also try server.js on its default port.
+  const FIREBASE_CONFIG = window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey ? window.FIREBASE_CONFIG : null;
+  const FIREBASE_SDK = 'https://www.gstatic.com/firebasejs/13.0.0';
+  const REQUEST_TIMEOUT_MS = 10000;
   const SERVER_PORT = 3000;
   const API_CANDIDATES = [...new Set([
     ...(location.protocol.startsWith('http') ? [location.origin] : []),
@@ -40,8 +45,8 @@
   const pick = (arr) => arr[rand(0, arr.length - 1)];
 
   // ---------- Storage ----------
-  // The server database is the source of truth, shared by every machine. A copy is kept on this
-  // device, and results that couldn't reach the server are queued and sent the next time it answers.
+  // The online database is the source of truth, shared by every machine. A copy is kept on this
+  // device, and results that couldn't be saved are queued and sent the next time the database answers.
   function readLocal(key, fallback) {
     try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
   }
@@ -55,26 +60,103 @@
   const cleanName = (name) => name.trim().replace(/\s+/g, ' ');
   const userKey = (name) => cleanName(name).toLowerCase();
 
-  let apiBase = null; // the candidate that last answered
-  async function api(path, body) {
-    let lastError;
-    for (const base of apiBase ? [apiBase] : API_CANDIDATES) {
-      try {
-        const res = await fetch(base + path, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) throw new Error(`Server error ${res.status}`);
-        const data = await res.json();
-        apiBase = base;
-        return data;
-      } catch (err) {
-        lastError = err;
+  function withTimeout(promise) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out')), REQUEST_TIMEOUT_MS)),
+    ]);
+  }
+  const newId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+  // Each backend has loadUser(name) -> { key, name, records } and addResult(item).
+  function serverBackend() {
+    let apiBase = null; // the candidate that last answered
+    async function api(path, body) {
+      let lastError;
+      for (const base of apiBase ? [apiBase] : API_CANDIDATES) {
+        try {
+          const res = await withTimeout(fetch(base + path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }));
+          if (!res.ok) throw new Error(`Server error ${res.status}`);
+          const data = await res.json();
+          apiBase = base;
+          return data;
+        } catch (err) {
+          lastError = err;
+        }
       }
+      apiBase = null;
+      throw lastError;
     }
-    apiBase = null;
-    throw lastError;
+    return {
+      loadUser: (name) => api('/api/users', { name }),
+      addResult: (item) => api('/api/results', item),
+    };
+  }
+
+  // Firestore layout:
+  //   users/{userKey}                                   { name, lastVisit }
+  //   users/{userKey}/records/{date_op_levels_digits}   { date, op, levels, digits, correct, wrong, totalTime, lastResult }
+  //   users/{userKey}/results/{resultId}                { at }  -- marks a result as counted, so a retry never counts twice
+  async function firebaseBackend(config) {
+    const [{ initializeApp }, fs] = await Promise.all([
+      import(`${FIREBASE_SDK}/firebase-app.js`),
+      import(`${FIREBASE_SDK}/firebase-firestore.js`),
+    ]);
+    const db = fs.getFirestore(initializeApp(config));
+    const userRef = (name) => fs.doc(db, 'users', userKey(name));
+
+    return {
+      async loadUser(name) {
+        const ref = userRef(name);
+        await fs.setDoc(ref, { name, lastVisit: fs.serverTimestamp() }, { merge: true });
+        const snap = await fs.getDocsFromServer(fs.collection(ref, 'records'));
+        const records = snap.docs.map((d) => {
+          const r = d.data();
+          const total = r.correct + r.wrong;
+          return {
+            date: r.date, op: r.op, levels: r.levels, digits: r.digits,
+            correct: r.correct, wrong: r.wrong, totalTime: r.totalTime, avgTime: total ? r.totalTime / total : 0,
+          };
+        });
+        return { key: userKey(name), name, records };
+      },
+      async addResult(item) {
+        const ref = userRef(item.name);
+        const op = item.op || '';
+        const levels = item.levels || 0;
+        const digits = item.digits || 0;
+        const recRef = fs.doc(ref, 'records', `${item.date}_${op}_${levels}_${digits}`);
+        const markRef = fs.doc(ref, 'results', item.id);
+        await fs.runTransaction(db, async (tx) => {
+          const mark = await tx.get(markRef);
+          if (mark.exists()) return; // already counted by an earlier attempt
+          const rec = await tx.get(recRef);
+          const r = rec.exists() ? rec.data() : { correct: 0, wrong: 0, totalTime: 0 };
+          tx.set(ref, { name: cleanName(item.name), lastVisit: fs.serverTimestamp() }, { merge: true });
+          tx.set(markRef, { at: fs.serverTimestamp() });
+          tx.set(recRef, {
+            date: item.date, op, levels, digits,
+            correct: r.correct + (item.correct ? 1 : 0),
+            wrong: r.wrong + (item.correct ? 0 : 1),
+            totalTime: r.totalTime + item.seconds,
+            lastResult: item.id,
+          });
+        });
+      },
+    };
+  }
+
+  let backendPromise = null;
+  function getBackend() {
+    if (!backendPromise) {
+      backendPromise = (FIREBASE_CONFIG ? firebaseBackend(FIREBASE_CONFIG) : Promise.resolve(serverBackend()))
+        .catch((err) => { backendPromise = null; throw err; }); // e.g. SDK failed to download: retry next time
+    }
+    return withTimeout(backendPromise);
   }
 
   function cacheUser(user) {
@@ -106,8 +188,10 @@
     if (!flushing) {
       flushing = (async () => {
         // Re-read each time so results queued while sending are included.
+        const backend = await getBackend();
         for (let queue = readLocal(PENDING_KEY, []); queue.length; queue = readLocal(PENDING_KEY, [])) {
-          await api('/api/results', queue[0]);
+          if (!queue[0].id) { queue[0].id = newId(); writeLocal(PENDING_KEY, queue); } // queued by an older version
+          await withTimeout(backend.addResult(queue[0]));
           writeLocal(PENDING_KEY, readLocal(PENDING_KEY, []).slice(1));
         }
       })().finally(() => { flushing = null; });
@@ -117,9 +201,10 @@
 
   function setSyncStatus(online) {
     const el = $('#sync-status');
+    const where = FIREBASE_CONFIG ? 'the online database' : 'the score server (run "npm start")';
     el.textContent = online
-      ? '☁️ Scores are saved in the database and shared across machines.'
-      : '⚠️ Can\'t reach the score server (run "npm start") — scores are kept on this device and will be sent when it is back.';
+      ? '☁️ Scores are saved online and shared across machines.'
+      : `⚠️ Can't reach ${where} — scores are kept on this device and will be sent when it is back.`;
     el.className = `sync ${online ? 'online' : 'offline'}`;
   }
 
@@ -127,7 +212,8 @@
   async function loadUser(name) {
     try {
       await flushPending();
-      const user = await api('/api/users', { name: cleanName(name) });
+      const backend = await getBackend();
+      const user = await withTimeout(backend.loadUser(cleanName(name)));
       cacheUser(user);
       setSyncStatus(true);
       return user;
@@ -144,7 +230,7 @@
     const { op } = state.problem;
     const { levels, digits } = state.settings[op];
     const item = {
-      name: state.userName, date: todayStr(), op, levels, digits,
+      id: newId(), name: state.userName, date: todayStr(), op, levels, digits,
       correct: isCorrect, seconds: Math.round(seconds * 10) / 10,
     };
     state.user = addLocalResult(item);
@@ -621,7 +707,7 @@
   // If this page isn't served by the game server (e.g. VS Code Live Server, which reloads the page
   // whenever the database file changes and sends kids back to the home page), switch to the game server.
   (async () => {
-    if (!location.protocol.startsWith('http')) return;
+    if (FIREBASE_CONFIG || !location.protocol.startsWith('http')) return;
     const ping = async (base) => {
       try { return (await fetch(`${base}/api/ping`, { cache: 'no-store' })).ok; } catch { return false; }
     };

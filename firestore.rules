@@ -1,0 +1,68 @@
+rules_version = '2';
+
+// Security rules for Math Quest Kids. Paste into: Firebase console -> Firestore Database -> Rules -> Publish.
+//
+// Players have no password (same as the local server): anyone with the site can read scores and add
+// results. These rules make sure every write has the right shape and that each answer can only
+// add exactly one correct-or-wrong to a record, so totals can't be edited or wiped.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function validName(name, key) {
+      return name is string && name.matches('^[\\p{L}\\p{N} ._-]{1,30}$') && name.lower() == key;
+    }
+
+    function validSettings(d) {
+      return (d.op == '' && d.levels == 0 && d.digits == 0)
+        || (d.op in ['add', 'sub'] && d.levels >= 2 && d.levels <= 4 && d.digits >= 1 && d.digits <= 6)
+        || (d.op == 'mul' && d.levels == 2 && d.digits >= 1 && d.digits <= 4);
+    }
+
+    function resultPath(key, id) {
+      return /databases/$(database)/documents/users/$(key)/results/$(id);
+    }
+
+    // A record write must come with a brand-new result marker in the same transaction.
+    function validRecord(d, recId, key) {
+      return d.keys().hasOnly(['date', 'op', 'levels', 'digits', 'correct', 'wrong', 'totalTime', 'lastResult'])
+        && d.keys().hasAll(['date', 'op', 'levels', 'digits', 'correct', 'wrong', 'totalTime', 'lastResult'])
+        && d.date is string && d.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && d.op is string && d.levels is int && d.digits is int && validSettings(d)
+        && recId == d.date + '_' + d.op + '_' + string(d.levels) + '_' + string(d.digits)
+        && d.correct is int && d.wrong is int && d.totalTime is number
+        && d.lastResult is string
+        && !exists(resultPath(key, d.lastResult))
+        && existsAfter(resultPath(key, d.lastResult));
+    }
+
+    match /users/{userKey} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasOnly(['name', 'lastVisit'])
+        && validName(request.resource.data.name, userKey)
+        && request.resource.data.lastVisit == request.time;
+
+      match /records/{recId} {
+        allow read: if true;
+        allow create: if validRecord(request.resource.data, recId, userKey)
+          && request.resource.data.correct + request.resource.data.wrong == 1
+          && request.resource.data.totalTime >= 0 && request.resource.data.totalTime <= 3600;
+        allow update: if validRecord(request.resource.data, recId, userKey)
+          && request.resource.data.correct >= resource.data.correct
+          && request.resource.data.wrong >= resource.data.wrong
+          && request.resource.data.correct + request.resource.data.wrong
+             == resource.data.correct + resource.data.wrong + 1
+          && request.resource.data.totalTime >= resource.data.totalTime
+          && request.resource.data.totalTime <= resource.data.totalTime + 3600;
+      }
+
+      // One marker per answer, so a retried save is never counted twice.
+      match /results/{resultId} {
+        allow read: if true;
+        allow create: if resultId.size() <= 64
+          && request.resource.data.keys().hasOnly(['at'])
+          && request.resource.data.at == request.time;
+      }
+    }
+  }
+}
