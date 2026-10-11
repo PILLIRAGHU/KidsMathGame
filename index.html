@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Math Quest Kids</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧮</text></svg>">
+</head>
+<body>
+  <header class="app-header">
+    <!-- Logo -->
+    <div class="logo" aria-label="Math Quest Kids logo">
+      <svg class="logo-badge" viewBox="0 0 120 120" aria-hidden="true">
+        <defs>
+          <linearGradient id="lg-badge" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#7c4dff"/>
+            <stop offset="1" stop-color="#ff4f9a"/>
+          </linearGradient>
+        </defs>
+        <circle cx="60" cy="60" r="56" fill="url(#lg-badge)"/>
+        <circle cx="60" cy="60" r="48" fill="none" stroke="#fff" stroke-width="3" stroke-dasharray="6 6" opacity=".6"/>
+        <g font-family="Fredoka, Arial, sans-serif" font-weight="700" text-anchor="middle">
+          <circle cx="38" cy="38" r="17" fill="#ffd23f"/><text x="38" y="48" font-size="30" fill="#5b2a86">+</text>
+          <circle cx="82" cy="38" r="17" fill="#3ddc97"/><text x="82" y="47" font-size="30" fill="#0b4f3a">−</text>
+          <circle cx="38" cy="82" r="17" fill="#4cc9f0"/><text x="38" y="92" font-size="28" fill="#0b3b5b">×</text>
+          <circle cx="82" cy="82" r="17" fill="#ff9f1c"/><text x="82" y="92" font-size="28" fill="#5a2a00">÷</text>
+        </g>
+        <path d="M60 46 l4 9 10 1 -7.5 7 2 10 -8.5-5 -8.5 5 2-10 -7.5-7 10-1z" fill="#fff"/>
+      </svg>
+      <div class="logo-text">
+        <span class="logo-title"><span class="c1">M</span><span class="c2">a</span><span class="c3">t</span><span class="c4">h</span> <span class="c5">Quest</span></span>
+        <span class="logo-sub">Kids Math Adventure</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- PAGE 1: HOME -->
+    <section id="page-home" class="page active">
+      <div class="card">
+        <h1>Let's play with numbers! 🚀</h1>
+        <form id="home-form" novalidate>
+          <fieldset class="ops">
+            <legend>1. Choose what you want to practice</legend>
+            <label class="op-check op-add">
+              <input type="checkbox" name="op" value="add">
+              <span class="op-box"><span class="op-sym">+</span>Addition</span>
+            </label>
+            <label class="op-check op-sub">
+              <input type="checkbox" name="op" value="sub">
+              <span class="op-box"><span class="op-sym">−</span>Subtraction</span>
+            </label>
+            <label class="op-check op-mul">
+              <input type="checkbox" name="op" value="mul">
+              <span class="op-box"><span class="op-sym">×</span>Multiplication</span>
+            </label>
+          </fieldset>
+
+          <div class="field">
+            <label for="username" class="field-label">2. What is your name?</label>
+            <input id="username" type="text" maxlength="30" autocomplete="off" placeholder="Type your name here">
+          </div>
+
+          <div id="home-error" class="error" role="alert" aria-live="polite"></div>
+          <div class="actions">
+            <button type="submit" class="btn primary">Next ➜</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- PAGE 2: OPERATION SETTINGS -->
+    <section id="page-settings" class="page">
+      <div class="card">
+        <h1>Hi <span class="player-name"></span>! Pick your challenge 🎯</h1>
+        <p class="hint">Levels = how many numbers in each question. Digits = how many digits in each number.
+          If you don't pick, we use <b>2 levels</b> and <b>2 digits</b>.</p>
+        <div id="settings-list" class="settings-list"></div>
+        <div class="actions">
+          <button type="button" id="settings-back" class="btn ghost">⬅ Back</button>
+          <button type="button" id="settings-next" class="btn primary">Next ➜</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- PAGE 3: HISTORY + START -->
+    <section id="page-history" class="page">
+      <div class="card">
+        <h1><span class="player-name"></span>'s Score Book 📒</h1>
+        <div id="settings-summary" class="chips"></div>
+        <div id="history-wrap" class="table-wrap"></div>
+        <div class="actions">
+          <button type="button" id="history-back" class="btn ghost">⬅ Change settings</button>
+          <button type="button" id="start-btn" class="btn start">▶ Start</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- PAGE 4: GAME -->
+    <section id="page-game" class="page">
+      <div class="scorebar">
+        <div class="score correct">✅ Correct: <b id="score-correct">0</b></div>
+        <div class="score wrong">❌ Wrong: <b id="score-wrong">0</b></div>
+        <div class="score timer">⏱ <b id="timer">0</b>s</div>
+      </div>
+      <div class="card game-card">
+        <div class="game-top">
+          <span class="badge" id="q-label">Question 1</span>
+          <span class="badge op-badge" id="op-label">Addition</span>
+          <button type="button" id="sound-btn" class="icon-btn" aria-label="Toggle sound" title="Sound on/off">🔊</button>
+        </div>
+        <div id="expression" class="expression" aria-live="polite"></div>
+        <div id="board" class="board"></div>
+        <div id="game-msg" class="error" role="alert" aria-live="polite"></div>
+        <div class="actions">
+          <button type="button" id="finish-btn" class="btn ghost">🏁 Finish</button>
+          <button type="button" id="clear-btn" class="btn ghost">🧽 Clear</button>
+          <button type="button" id="check-btn" class="btn primary">✔ Check</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Feedback overlay -->
+  <div id="feedback" class="feedback hidden" role="dialog" aria-modal="true" aria-labelledby="fb-title">
+    <div class="fb-card">
+      <div class="fb-emoji" id="fb-emoji">🎉</div>
+      <h2 id="fb-title">Awesome!</h2>
+      <p id="fb-text"></p>
+      <button type="button" id="next-btn" class="btn primary">Next question ➜</button>
+    </div>
+  </div>
+  <div id="fx-layer" class="fx-layer" aria-hidden="true"></div>
+
+  <footer class="app-footer">
+    © <span id="year"></span> Math Quest Kids. All rights reserved. · Designed &amp; developed by <b>Raghu Pilli</b>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
