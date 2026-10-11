@@ -125,6 +125,10 @@ th { background: var(--primary); color: #fff; }
 th:first-child { border-top-left-radius: 12px; } th:last-child { border-top-right-radius: 12px; }
 tbody tr:nth-child(even) { background: #f7f4ff; }
 td.good { color: var(--green); font-weight: 600; } td.bad { color: var(--red); font-weight: 600; }
+.sync { text-align: center; font-size: 14px; margin: 8px 0 0; color: var(--muted); }
+.sync.online { color: #0b6b44; }
+.sync.offline { color: #a15c00; }
+.btn:disabled { opacity: .6; cursor: wait; }
 .empty { text-align: center; color: var(--muted); padding: 20px; background: #f7f4ff; border-radius: 14px; }
 
 /* ---------- Game ---------- */

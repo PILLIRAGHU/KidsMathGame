@@ -7,16 +7,19 @@
     mul: { label: 'Multiplication', symbol: '×', fixedLevels: 2, maxDigits: 4 },
   };
   const DEFAULT_LEVELS = 2;
-  const DEFAULT_DIGITS = 2;
-  const STORE_KEY = 'mathQuestKids.users.v1';
+  const DEFAULT_DIGITS = 1;
+  const CACHE_KEY = 'mathQuestKids.users.v1';
+  const PENDING_KEY = 'mathQuestKids.pending.v1';
+  // Records are stored in the server's database when the game is opened through server.js.
+  const USE_SERVER = location.protocol === 'http:' || location.protocol === 'https:';
   const CHEERS = ['Awesome!', 'Super star!', 'You got it!', 'Brilliant!', 'Fantastic!', 'Math wizard!'];
   const CHEER_EMOJI = ['🎉', '🌟', '🏆', '🥳', '🚀', '🦄'];
   const OOPS = ['Oops!', 'Nice try!', 'Almost!', 'Keep going!'];
   const OOPS_EMOJI = ['😢', '🙈', '😮', '🐢'];
 
   const state = {
-    userKey: null,
     userName: '',
+    user: null,
     ops: [],
     settings: {},
     session: { correct: 0, wrong: 0, totalTime: 0, count: 0 },
@@ -32,41 +35,113 @@
   const pick = (arr) => arr[rand(0, arr.length - 1)];
 
   // ---------- Storage ----------
-  function loadUsers() {
-    try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; }
+  // The server database is the source of truth, shared by every machine. A copy is kept on this
+  // device, and results that couldn't reach the server are queued and sent the next time it answers.
+  function readLocal(key, fallback) {
+    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
   }
-  function saveUsers(users) {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(users)); } catch { /* storage unavailable */ }
+  function writeLocal(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ }
   }
   function todayStr() {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
-  // Creates the user record if it doesn't exist, otherwise updates it.
-  function ensureUser(name) {
-    const users = loadUsers();
-    const key = name.trim().toLowerCase();
-    if (!users[key]) users[key] = { name: name.trim(), created: new Date().toISOString(), records: [] };
-    users[key].name = name.trim();
-    users[key].lastVisit = new Date().toISOString();
-    saveUsers(users);
-    return key;
+  const cleanName = (name) => name.trim().replace(/\s+/g, ' ');
+  const userKey = (name) => cleanName(name).toLowerCase();
+
+  async function api(path, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Server error ${res.status}`);
+    return res.json();
+  }
+
+  function cacheUser(user) {
+    const users = readLocal(CACHE_KEY, {});
+    users[user.key] = user;
+    writeLocal(CACHE_KEY, users);
+  }
+  function cachedUser(name) {
+    const key = userKey(name);
+    return readLocal(CACHE_KEY, {})[key] || { key, name: cleanName(name), records: [] };
   }
   // One record per user per date: date, correct, wrong, average time.
-  function recordResult(isCorrect, seconds) {
-    const users = loadUsers();
-    const user = users[state.userKey];
-    if (!user) return;
-    const date = todayStr();
+  function addLocalResult({ name, date, correct, seconds }) {
+    const user = cachedUser(name);
     let rec = user.records.find((r) => r.date === date);
     if (!rec) {
       rec = { date, correct: 0, wrong: 0, totalTime: 0, avgTime: 0 };
       user.records.push(rec);
     }
-    if (isCorrect) rec.correct++; else rec.wrong++;
+    if (correct) rec.correct++; else rec.wrong++;
     rec.totalTime += seconds;
     rec.avgTime = rec.totalTime / (rec.correct + rec.wrong);
-    saveUsers(users);
+    cacheUser(user);
+    return user;
+  }
+
+  let flushing = null;
+  function flushPending() {
+    if (!flushing) {
+      flushing = (async () => {
+        // Re-read each time so results queued while sending are included.
+        for (let queue = readLocal(PENDING_KEY, []); queue.length; queue = readLocal(PENDING_KEY, [])) {
+          await api('/api/results', queue[0]);
+          writeLocal(PENDING_KEY, readLocal(PENDING_KEY, []).slice(1));
+        }
+      })().finally(() => { flushing = null; });
+    }
+    return flushing;
+  }
+
+  function setSyncStatus(online) {
+    const el = $('#sync-status');
+    if (!USE_SERVER) {
+      el.textContent = '📱 Scores are saved on this device only. Start the game with server.js to share them across machines.';
+    } else if (online) {
+      el.textContent = '☁️ Scores are saved online and shared across machines.';
+    } else {
+      el.textContent = '⚠️ Can\'t reach the server — scores are kept on this device and will be sent when it is back.';
+    }
+    el.className = `sync ${USE_SERVER && online ? 'online' : 'offline'}`;
+  }
+
+  // Creates the user record if it doesn't exist, otherwise updates it; returns the user with records.
+  async function loadUser(name) {
+    if (USE_SERVER) {
+      try {
+        await flushPending();
+        const user = await api('/api/users', { name: cleanName(name) });
+        cacheUser(user);
+        setSyncStatus(true);
+        return user;
+      } catch {
+        setSyncStatus(false);
+      }
+    } else {
+      setSyncStatus(false);
+    }
+    const user = cachedUser(name);
+    user.name = cleanName(name);
+    cacheUser(user);
+    return user;
+  }
+
+  async function recordResult(isCorrect, seconds) {
+    const item = { name: state.userName, date: todayStr(), correct: isCorrect, seconds: Math.round(seconds * 10) / 10 };
+    state.user = addLocalResult(item);
+    if (!USE_SERVER) return;
+    writeLocal(PENDING_KEY, [...readLocal(PENDING_KEY, []), item]);
+    try {
+      await flushPending();
+      setSyncStatus(true);
+    } catch {
+      setSyncStatus(false);
+    }
   }
 
   // ---------- Navigation ----------
@@ -83,7 +158,7 @@
   }
 
   // ---------- Page 1: Home ----------
-  $('#home-form').addEventListener('submit', (e) => {
+  $('#home-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const ops = $$('input[name="op"]:checked').map((c) => c.value);
     const nameInput = $('#username');
@@ -100,10 +175,13 @@
     setError($('#home-error'), msg);
     if (msg) { (name ? fieldset.querySelector('input') : nameInput).focus(); return; }
 
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
     state.ops = ops;
-    state.userName = name;
-    state.userKey = ensureUser(name);
-    $$('.player-name').forEach((el) => { el.textContent = name; });
+    state.userName = cleanName(name);
+    state.user = await loadUser(name);
+    submitBtn.disabled = false;
+    $$('.player-name').forEach((el) => { el.textContent = state.user.name; });
     buildSettings();
     showPage('page-settings');
   });
@@ -111,8 +189,8 @@
   $$('input[name="op"]').forEach((c) => c.addEventListener('change', () => $('.ops').classList.remove('invalid')));
 
   // ---------- Page 2: Settings ----------
-  function selectHtml(id, min, max) {
-    let html = `<select id="${id}"><option value="">Select (default 2)</option>`;
+  function selectHtml(id, min, max, def) {
+    let html = `<select id="${id}"><option value="">Select (default ${def})</option>`;
     for (let i = min; i <= max; i++) html += `<option value="${i}">${i}</option>`;
     return html + '</select>';
   }
@@ -126,13 +204,13 @@
       card.className = `op-card op-${op}`;
       const levelsField = cfg.fixedLevels
         ? `<label>Number of levels</label><div class="fixed">${cfg.fixedLevels} (fixed)</div>`
-        : `<label for="${op}-levels">Number of levels (max ${cfg.maxLevels})</label>${selectHtml(`${op}-levels`, 2, cfg.maxLevels)}`;
+        : `<label for="${op}-levels">Number of levels (max ${cfg.maxLevels})</label>${selectHtml(`${op}-levels`, 2, cfg.maxLevels, DEFAULT_LEVELS)}`;
       card.innerHTML = `
         <h3>${cfg.symbol} ${cfg.label}</h3>
         <div class="field">${levelsField}</div>
         <div class="field">
           <label for="${op}-digits">Number of digits (max ${cfg.maxDigits})</label>
-          ${selectHtml(`${op}-digits`, 1, cfg.maxDigits)}
+          ${selectHtml(`${op}-digits`, 1, cfg.maxDigits, DEFAULT_DIGITS)}
         </div>`;
       list.appendChild(card);
       if (prev) {
@@ -161,8 +239,7 @@
       return `<span class="chip">${OPS[op].symbol} ${OPS[op].label}: ${s.levels} levels · ${s.digits} digits</span>`;
     }).join('');
 
-    const user = loadUsers()[state.userKey];
-    const records = user ? [...user.records].sort((a, b) => b.date.localeCompare(a.date)) : [];
+    const records = [...(state.user?.records || [])].sort((a, b) => b.date.localeCompare(a.date));
     const wrap = $('#history-wrap');
     if (!records.length) {
       wrap.innerHTML = '<div class="empty">No games yet — this is your very first adventure! 🌈</div>';
@@ -429,9 +506,10 @@
     const inputs = $$('#board .ans');
     inputs[inputs.length - 1].focus();
   });
-  $('#finish-btn').addEventListener('click', () => {
+  $('#finish-btn').addEventListener('click', async () => {
     stopTimer();
     $('#feedback').classList.add('hidden');
+    state.user = await loadUser(state.userName);
     renderHistory();
     showPage('page-history');
   });

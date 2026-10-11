@@ -1,0 +1,14 @@
+{
+  "name": "math-quest-kids",
+  "version": "1.0.0",
+  "description": "Kids math game (addition, subtraction, multiplication) with shared score records.",
+  "author": "Raghu Pilli",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}
