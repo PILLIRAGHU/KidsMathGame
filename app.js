@@ -221,7 +221,42 @@
       answer = nums[0] * nums[1];
       width = digits * 2;
     }
-    return { op, nums, answer, width };
+    return { op, nums, answer, width, cues: helperCues(op, nums, width) };
+  }
+
+  const digitAt = (n, place) => Math.floor(n / 10 ** place) % 10;
+
+  // Which helper boxes (left-to-right) get a carry/borrow, and what value goes there.
+  // A number means "this exact value is expected", true means "needed, value not checked", 0 means "not needed".
+  function helperCues(op, nums, width) {
+    const cues = Array(width).fill(0);
+    if (op === 'add') {
+      let carry = 0;
+      for (let k = 0; k < width; k++) {
+        cues[width - 1 - k] = carry;
+        carry = Math.floor((nums.reduce((a, n) => a + digitAt(n, k), 0) + carry) / 10);
+      }
+    } else if (op === 'sub') {
+      // Borrow is shown above the column that lends it (like a carry, but taken away).
+      let borrow = 0;
+      for (let k = 0; k < width; k++) {
+        cues[width - 1 - k] = borrow;
+        const diff = digitAt(nums[0], k) - nums.slice(1).reduce((a, n) => a + digitAt(n, k), 0) - borrow;
+        borrow = diff < 0 ? Math.ceil(-diff / 10) : 0;
+      }
+    } else {
+      // Multiplication: carries sit above the top number's digits; one box is reused for every
+      // digit of the bottom number, so the column is marked but its value isn't checked.
+      const [top, bottom] = nums.map(String);
+      for (const m of bottom) {
+        let carry = 0;
+        for (let i = 0; i < top.length - 1; i++) {
+          carry = Math.floor((digitAt(nums[0], i) * Number(m) + carry) / 10);
+          if (carry > 0) cues[width - 2 - i] = true;
+        }
+      }
+    }
+    return cues;
   }
 
   function nextProblem() {
@@ -246,10 +281,11 @@
     board.style.setProperty('--cols', cols);
     let html = '';
 
-    // Helper row of checkboxes (carry / borrow cues) above the digit columns.
-    html += '<div class="cue-label">Helper boxes — tick to remember a carry or borrow</div>';
+    // Helper row above the digit columns where kids write their carry / borrow value.
+    html += `<div class="cue-label">Helper boxes — write the ${p.op === 'sub' ? 'borrow' : 'carry'} number here</div>`;
     for (let c = 0; c < p.width; c++) {
-      html += `<div class="cell cue"><input type="checkbox" aria-label="Helper box ${c + 1}"></div>`;
+      const expect = p.cues[c] ? ' expect' : '';
+      html += `<div class="cell cue"><input class="cue-in${expect}" type="text" inputmode="numeric" maxlength="2" autocomplete="off" aria-label="Helper box ${c + 1}"></div>`;
     }
     html += '<div class="cell cue"></div>';
 
@@ -263,9 +299,10 @@
 
     html += '<div class="rule"></div>';
 
-    // Answer row.
+    // Answer row: only the boxes the answer actually fills are highlighted.
+    const answerStart = p.width - String(p.answer).length;
     for (let c = 0; c < p.width; c++) {
-      html += `<input class="ans" type="text" inputmode="numeric" maxlength="1" autocomplete="off" aria-label="Answer digit ${c + 1}">`;
+      html += `<input class="ans${c >= answerStart ? ' expect' : ''}" type="text" inputmode="numeric" maxlength="1" autocomplete="off" aria-label="Answer digit ${c + 1}">`;
     }
     html += '<div class="cell opsym">=</div>';
     board.innerHTML = html;
@@ -274,20 +311,49 @@
     inputs.forEach((inp, i) => {
       inp.addEventListener('input', () => {
         inp.value = inp.value.replace(/\D/g, '').slice(-1);
+        markDigit(inp, i);
         // Kids solve right to left, so move focus to the left after each digit.
-        if (inp.value && i > 0) inputs[i - 1].focus();
+        if (inp.value && i > 0 && inputs[i - 1].classList.contains('expect')) inputs[i - 1].focus();
         setError($('#game-msg'), '');
       });
       inp.addEventListener('focus', () => inp.select());
       inp.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); checkAnswer(); }
         else if (e.key === 'Backspace' && !inp.value && i < inputs.length - 1) {
-          e.preventDefault(); inputs[i + 1].value = ''; inputs[i + 1].focus();
+          e.preventDefault(); inputs[i + 1].value = ''; markDigit(inputs[i + 1], i + 1); inputs[i + 1].focus();
         } else if (e.key === 'ArrowLeft' && i > 0) { e.preventDefault(); inputs[i - 1].focus(); }
         else if (e.key === 'ArrowRight' && i < inputs.length - 1) { e.preventDefault(); inputs[i + 1].focus(); }
       });
     });
+    $$('#board .cue-in').forEach((inp, i) => {
+      inp.addEventListener('input', () => {
+        inp.value = inp.value.replace(/\D/g, '').slice(0, 2);
+        markCue(inp, i);
+      });
+      inp.addEventListener('focus', () => inp.select());
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); checkAnswer(); }
+      });
+    });
     inputs[inputs.length - 1].focus();
+  }
+
+  // Colour one answer box: green if the digit is right for that column, red if wrong, blue (default) if empty.
+  function markDigit(inp, i) {
+    const p = state.problem;
+    const expected = String(p.answer).padStart(p.width, ' ')[i];
+    const ok = inp.value === expected || (expected === ' ' && inp.value === '0');
+    inp.classList.toggle('ok', !!inp.value && ok);
+    inp.classList.toggle('bad', !!inp.value && !ok);
+  }
+
+  // Colour a helper box green/red when its value can be checked (addition / subtraction).
+  function markCue(inp, i) {
+    const expected = state.problem.cues[i];
+    const filled = !!inp.value && expected !== true;
+    const ok = filled && parseInt(inp.value, 10) === expected;
+    inp.classList.toggle('ok', filled && ok);
+    inp.classList.toggle('bad', filled && !ok);
   }
 
   function startTimer() {
@@ -359,7 +425,7 @@
   });
   $('#check-btn').addEventListener('click', checkAnswer);
   $('#clear-btn').addEventListener('click', () => {
-    $$('#board input').forEach((i) => { if (i.type === 'checkbox') i.checked = false; else i.value = ''; });
+    $$('#board input').forEach((i) => { i.value = ''; i.classList.remove('ok', 'bad'); });
     const inputs = $$('#board .ans');
     inputs[inputs.length - 1].focus();
   });
