@@ -10,8 +10,13 @@
   const DEFAULT_DIGITS = 1;
   const CACHE_KEY = 'mathQuestKids.users.v1';
   const PENDING_KEY = 'mathQuestKids.pending.v1';
-  // Records are stored in the server's database when the game is opened through server.js.
-  const USE_SERVER = location.protocol === 'http:' || location.protocol === 'https:';
+  // Records are stored in server.js's SQLite database. The page may be served by server.js itself or by
+  // something else (Live Server, a file:// double-click), so also try server.js on its default port.
+  const SERVER_PORT = 3000;
+  const API_CANDIDATES = [...new Set([
+    ...(location.protocol.startsWith('http') ? [location.origin] : []),
+    `http://${location.hostname || 'localhost'}:${SERVER_PORT}`,
+  ])];
   const CHEERS = ['Awesome!', 'Super star!', 'You got it!', 'Brilliant!', 'Fantastic!', 'Math wizard!'];
   const CHEER_EMOJI = ['🎉', '🌟', '🏆', '🥳', '🚀', '🦄'];
   const OOPS = ['Oops!', 'Nice try!', 'Almost!', 'Keep going!'];
@@ -50,14 +55,26 @@
   const cleanName = (name) => name.trim().replace(/\s+/g, ' ');
   const userKey = (name) => cleanName(name).toLowerCase();
 
+  let apiBase = null; // the candidate that last answered
   async function api(path, body) {
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`Server error ${res.status}`);
-    return res.json();
+    let lastError;
+    for (const base of apiBase ? [apiBase] : API_CANDIDATES) {
+      try {
+        const res = await fetch(base + path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`Server error ${res.status}`);
+        const data = await res.json();
+        apiBase = base;
+        return data;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    apiBase = null;
+    throw lastError;
   }
 
   function cacheUser(user) {
@@ -69,12 +86,12 @@
     const key = userKey(name);
     return readLocal(CACHE_KEY, {})[key] || { key, name: cleanName(name), records: [] };
   }
-  // One record per user per date: date, correct, wrong, average time.
-  function addLocalResult({ name, date, correct, seconds }) {
+  // One record per user, date, operation, levels and digits: correct, wrong, average time.
+  function addLocalResult({ name, date, op, levels, digits, correct, seconds }) {
     const user = cachedUser(name);
-    let rec = user.records.find((r) => r.date === date);
+    let rec = user.records.find((r) => r.date === date && r.op === op && r.levels === levels && r.digits === digits);
     if (!rec) {
-      rec = { date, correct: 0, wrong: 0, totalTime: 0, avgTime: 0 };
+      rec = { date, op, levels, digits, correct: 0, wrong: 0, totalTime: 0, avgTime: 0 };
       user.records.push(rec);
     }
     if (correct) rec.correct++; else rec.wrong++;
@@ -100,29 +117,21 @@
 
   function setSyncStatus(online) {
     const el = $('#sync-status');
-    if (!USE_SERVER) {
-      el.textContent = '📱 Scores are saved on this device only. Start the game with server.js to share them across machines.';
-    } else if (online) {
-      el.textContent = '☁️ Scores are saved online and shared across machines.';
-    } else {
-      el.textContent = '⚠️ Can\'t reach the server — scores are kept on this device and will be sent when it is back.';
-    }
-    el.className = `sync ${USE_SERVER && online ? 'online' : 'offline'}`;
+    el.textContent = online
+      ? '☁️ Scores are saved in the database and shared across machines.'
+      : '⚠️ Can\'t reach the score server (run "npm start") — scores are kept on this device and will be sent when it is back.';
+    el.className = `sync ${online ? 'online' : 'offline'}`;
   }
 
   // Creates the user record if it doesn't exist, otherwise updates it; returns the user with records.
   async function loadUser(name) {
-    if (USE_SERVER) {
-      try {
-        await flushPending();
-        const user = await api('/api/users', { name: cleanName(name) });
-        cacheUser(user);
-        setSyncStatus(true);
-        return user;
-      } catch {
-        setSyncStatus(false);
-      }
-    } else {
+    try {
+      await flushPending();
+      const user = await api('/api/users', { name: cleanName(name) });
+      cacheUser(user);
+      setSyncStatus(true);
+      return user;
+    } catch {
       setSyncStatus(false);
     }
     const user = cachedUser(name);
@@ -132,9 +141,13 @@
   }
 
   async function recordResult(isCorrect, seconds) {
-    const item = { name: state.userName, date: todayStr(), correct: isCorrect, seconds: Math.round(seconds * 10) / 10 };
+    const { op } = state.problem;
+    const { levels, digits } = state.settings[op];
+    const item = {
+      name: state.userName, date: todayStr(), op, levels, digits,
+      correct: isCorrect, seconds: Math.round(seconds * 10) / 10,
+    };
     state.user = addLocalResult(item);
-    if (!USE_SERVER) return;
     writeLocal(PENDING_KEY, [...readLocal(PENDING_KEY, []), item]);
     try {
       await flushPending();
@@ -239,7 +252,8 @@
       return `<span class="chip">${OPS[op].symbol} ${OPS[op].label}: ${s.levels} levels · ${s.digits} digits</span>`;
     }).join('');
 
-    const records = [...(state.user?.records || [])].sort((a, b) => b.date.localeCompare(a.date));
+    const records = [...(state.user?.records || [])].sort((a, b) => b.date.localeCompare(a.date)
+      || (a.op || '').localeCompare(b.op || '') || (a.levels || 0) - (b.levels || 0) || (a.digits || 0) - (b.digits || 0));
     const wrap = $('#history-wrap');
     if (!records.length) {
       wrap.innerHTML = '<div class="empty">No games yet — this is your very first adventure! 🌈</div>';
@@ -248,13 +262,16 @@
     const rows = records.map((r) => `
       <tr>
         <td>${formatDate(r.date)}</td>
+        <td class="op-cell">${OPS[r.op] ? `${OPS[r.op].symbol} ${OPS[r.op].label}` : '—'}</td>
+        <td>${r.levels || '—'}</td>
+        <td>${r.digits || '—'}</td>
         <td class="good">${r.correct}</td>
         <td class="bad">${r.wrong}</td>
         <td>${r.avgTime.toFixed(1)} s</td>
       </tr>`).join('');
     wrap.innerHTML = `
       <table>
-        <thead><tr><th>Date</th><th>Correct</th><th>Wrong</th><th>Avg. time</th></tr></thead>
+        <thead><tr><th>Date</th><th>Operation</th><th>Levels</th><th>Digits</th><th>Correct</th><th>Wrong</th><th>Avg. time</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
   }
@@ -600,4 +617,16 @@
   }
 
   $('#year').textContent = new Date().getFullYear();
+
+  // If this page isn't served by the game server (e.g. VS Code Live Server, which reloads the page
+  // whenever the database file changes and sends kids back to the home page), switch to the game server.
+  (async () => {
+    if (!location.protocol.startsWith('http')) return;
+    const ping = async (base) => {
+      try { return (await fetch(`${base}/api/ping`, { cache: 'no-store' })).ok; } catch { return false; }
+    };
+    if (await ping(location.origin)) return;
+    const gameServer = `http://${location.hostname}:${SERVER_PORT}`;
+    if (gameServer !== location.origin && await ping(gameServer)) location.replace(`${gameServer}/`);
+  })();
 })();

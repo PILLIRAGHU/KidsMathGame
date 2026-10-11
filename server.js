@@ -15,6 +15,11 @@ const DB_FILE = process.env.DB_FILE || path.join(__dirname, 'data', 'mathquest.d
 const MAX_BODY = 10 * 1024;
 const NAME_RE = /^[\p{L}\p{N} ._-]{1,30}$/u;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const OP_LIMITS = {
+  add: { minLevels: 2, maxLevels: 4, maxDigits: 6 },
+  sub: { minLevels: 2, maxLevels: 4, maxDigits: 6 },
+  mul: { minLevels: 2, maxLevels: 2, maxDigits: 4 },
+};
 
 // ---------- Database ----------
 fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
@@ -29,15 +34,35 @@ db.exec(`
     created_at TEXT NOT NULL,
     last_visit TEXT NOT NULL
   );
+`);
+
+// One record per user, date, operation, levels and digits.
+const RECORDS_SCHEMA = `
   CREATE TABLE IF NOT EXISTS records (
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     date       TEXT NOT NULL,
+    op         TEXT NOT NULL DEFAULT '',
+    levels     INTEGER NOT NULL DEFAULT 0,
+    digits     INTEGER NOT NULL DEFAULT 0,
     correct    INTEGER NOT NULL DEFAULT 0,
     wrong      INTEGER NOT NULL DEFAULT 0,
     total_time REAL NOT NULL DEFAULT 0,
-    PRIMARY KEY (user_id, date)
-  );
-`);
+    PRIMARY KEY (user_id, date, op, levels, digits)
+  );`;
+const recordCols = db.prepare('PRAGMA table_info(records)').all().map((c) => c.name);
+if (recordCols.length && !recordCols.includes('levels')) {
+  // Older databases kept one record per date; keep those rows with an unknown operation/levels/digits.
+  db.exec(`
+    BEGIN;
+    ALTER TABLE records RENAME TO records_old;
+    ${RECORDS_SCHEMA}
+    INSERT INTO records (user_id, date, correct, wrong, total_time)
+      SELECT user_id, date, correct, wrong, total_time FROM records_old;
+    DROP TABLE records_old;
+    COMMIT;`);
+} else {
+  db.exec(RECORDS_SCHEMA);
+}
 
 const sql = {
   upsertUser: db.prepare(`
@@ -45,10 +70,11 @@ const sql = {
     ON CONFLICT(user_key) DO UPDATE SET name = excluded.name, last_visit = excluded.last_visit
     RETURNING id, user_key, name`),
   records: db.prepare(`
-    SELECT date, correct, wrong, total_time FROM records WHERE user_id = ? ORDER BY date DESC`),
+    SELECT date, op, levels, digits, correct, wrong, total_time FROM records
+    WHERE user_id = ? ORDER BY date DESC, op, levels, digits`),
   addResult: db.prepare(`
-    INSERT INTO records (user_id, date, correct, wrong, total_time) VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(user_id, date) DO UPDATE SET
+    INSERT INTO records (user_id, date, op, levels, digits, correct, wrong, total_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, date, op, levels, digits) DO UPDATE SET
       correct = correct + excluded.correct,
       wrong = wrong + excluded.wrong,
       total_time = total_time + excluded.total_time`),
@@ -68,6 +94,9 @@ function userWithRecords(user) {
     const total = r.correct + r.wrong;
     return {
       date: r.date,
+      op: r.op,
+      levels: r.levels,
+      digits: r.digits,
       correct: r.correct,
       wrong: r.wrong,
       totalTime: r.total_time,
@@ -80,9 +109,16 @@ function userWithRecords(user) {
 // ---------- HTTP helpers ----------
 function send(res, status, body, type = 'application/json; charset=utf-8') {
   const data = typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body);
-  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...CORS });
   res.end(data);
 }
+
+// Allow the game to be opened from another local server (e.g. VS Code Live Server) or a file.
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
 
 function readJson(req) {
   return new Promise((resolve, reject) => {
@@ -107,6 +143,8 @@ function validName(name) {
 
 // ---------- API ----------
 async function handleApi(req, res, pathname) {
+  if (req.method === 'GET' && pathname === '/api/ping') return send(res, 200, { ok: true });
+
   if (req.method === 'POST' && pathname === '/api/users') {
     const { name } = await readJson(req);
     if (!validName(name)) return send(res, 400, { error: 'Please use 1-30 letters, numbers or spaces for the name.' });
@@ -114,7 +152,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (req.method === 'POST' && pathname === '/api/results') {
-    const { name, date, correct, seconds } = await readJson(req);
+    const { name, date, correct, seconds, op, levels, digits } = await readJson(req);
     if (!validName(name)) return send(res, 400, { error: 'Invalid name.' });
     if (typeof date !== 'string' || !DATE_RE.test(date) || Number.isNaN(Date.parse(date))) {
       return send(res, 400, { error: 'Invalid date.' });
@@ -122,9 +160,17 @@ async function handleApi(req, res, pathname) {
     if (typeof correct !== 'boolean') return send(res, 400, { error: 'Invalid result.' });
     const secs = Number(seconds);
     if (!Number.isFinite(secs) || secs < 0) return send(res, 400, { error: 'Invalid time.' });
+    // Results queued by an older version of the page have no op/levels/digits; store them as unknown.
+    const legacy = op === undefined && levels === undefined && digits === undefined;
+    const limits = Object.hasOwn(OP_LIMITS, op) ? OP_LIMITS[op] : null;
+    if (!legacy && (!limits || !Number.isInteger(levels) || !Number.isInteger(digits)
+      || levels < limits.minLevels || levels > limits.maxLevels || digits < 1 || digits > limits.maxDigits)) {
+      return send(res, 400, { error: 'Invalid operation, levels or digits.' });
+    }
 
     const user = upsertUser(name);
-    sql.addResult.run(user.id, date, correct ? 1 : 0, correct ? 0 : 1, Math.min(secs, 3600));
+    sql.addResult.run(user.id, date, legacy ? '' : op, legacy ? 0 : levels, legacy ? 0 : digits,
+      correct ? 1 : 0, correct ? 0 : 1, Math.min(secs, 3600));
     return send(res, 200, userWithRecords(user));
   }
 
@@ -142,6 +188,7 @@ const STATIC = {
 const server = http.createServer(async (req, res) => {
   const { pathname } = new URL(req.url, 'http://localhost');
   try {
+    if (req.method === 'OPTIONS') { res.writeHead(204, CORS); return res.end(); }
     if (pathname.startsWith('/api/')) return await handleApi(req, res, pathname);
     const file = STATIC[pathname];
     if (!file || req.method !== 'GET') return send(res, 404, 'Not found', 'text/plain; charset=utf-8');

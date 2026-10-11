@@ -1,0 +1,10 @@
+{
+  // Don't reload the game page every time a score is written to the database.
+  "liveServer.settings.ignoreFiles": [
+    ".vscode/**",
+    "**/*.scss",
+    "**/*.sass",
+    "**/*.ts",
+    "data/**"
+  ]
+}

@@ -240,3 +240,9 @@ td.good { color: var(--green); font-weight: 600; } td.bad { color: var(--red); f
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+
+td.op-cell { white-space: nowrap; text-align: left; }
+@media (max-width: 560px) {
+  table { font-size: 14px; }
+  th, td { padding: 8px 6px; }
+}
